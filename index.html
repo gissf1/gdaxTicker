@@ -1,0 +1,266 @@
+<html>
+<head><title>Coin Ticker</title>
+<script src="http://code.jquery.com/jquery-2.1.0.min.js"></script>
+<script src="http://code.jquery.com/ui/1.10.4/jquery-ui.min.js"></script>
+<link href="http://code.jquery.com/ui/1.10.4/themes/ui-darkness/jquery-ui.css" rel="stylesheet" />
+<style>
+* {
+	margin:0;
+	font-family: Arial, Helvetica, sans-serif;
+}
+body {background:#999;}
+body.loading {background:#666;}
+table { border-collapse:collapse; }
+td {
+	border-left: 2px solid #777;
+	text-align: center;
+	font-size:20pt;
+	font-size:18vmin;
+	min-height: 0px;
+}
+td.middle {
+	font-size:calc(18vmin / 2);
+}
+#msg {
+	color:#d00;
+}
+/* TODO: find a way to hide the TR with #msg when #msg is empty */
+#msg:empty {
+	display:none;
+}
+body.loading #msg:empty:before {
+	height:auto;
+	content: "Loading...";
+	color: #bb4;
+	text-shadow: 0 0 4px black;
+}
+
+td.label {
+	color: #444;
+	font-size: 10vmin;
+	text-align: right;
+}
+td.label.left {
+	border-left: none;
+}
+td.label.top {
+	font-size: 12vmin;
+	text-align: center;
+	text-decoration: underline;
+}
+body.loading td:not(.label) {
+	color:#666;
+}
+</style>
+<script language="javascript" type='application/javascript'><!--
+
+var baseUrl='https://api.gdax.com'; // live
+// var baseUrl='https://api-public.sandbox.gdax.com'; //sandbox
+// var baseUrl='http://127.0.0.1/gdax/index.php'; //local content emulation
+var refreshInterval = 300000; // 5mins
+var xhrTimeout = 5000; // 5sec
+var state = {
+	message: "Loading...",
+	error: false,
+	btc_usd: {high: false,low: false},
+	eth_usd: {high: false,low: false},
+	nextQuery: -1,
+	updateContent: 1,
+	messagePumpHandle: false,
+};
+
+function handleQueryError(book, type, xhr, textStatus, serverText) {
+console.info("handleQueryError: xhr=", xhr);
+	var msg = textStatus;
+	if (msg == 'error' && xhr.readyState == 4) {
+		msg += " " + xhr.status;
+	}
+	if (serverText > "") msg += ": " + serverText;
+	if (typeof xhr.responseJSON == 'object'
+	&& typeof xhr.responseJSON.message == 'string') {
+		msg += ": " + xhr.responseJSON.message;
+	}
+	state.message = msg;
+	state.updateContent++;
+}
+
+function queryTicker(book, onSuccess) {
+	// /products/COIN/ticker
+	// /products/COIN/stats
+	// /products/COIN/candles
+	$.ajax({
+		dataType: "json",
+		timeout: xhrTimeout,
+		url: baseUrl + '/products/' + book + '/ticker',
+		success: function(response, textStatus, xhr) {
+			onSuccess(book, "ticker", response, textStatus, xhr);
+		},
+		error: function(xhr, textStatus, serverText){
+			handleQueryError(book, "ticker", xhr, textStatus, serverText);
+		},
+	});
+	var granularity = 300; // 5 mins
+	var endts = Math.floor(Date.now() / (granularity*1000)) * granularity*1000;
+	var start = endts - (granularity * 6000);
+	endts = (new Date(start + (granularity * 2000))).toISOString()
+	start = (new Date(start)).toISOString()
+	var args = "start=" + start + "&end=" + endts + "&granularity=" + granularity;
+// 	console.info("args=", args);
+	$.ajax({
+		dataType: "json",
+		timeout: xhrTimeout,
+		url: baseUrl + '/products/' + book + '/candles?' + args,
+		success: function(response, textStatus, xhr) {
+			onSuccess(book, "candles", response, textStatus, xhr);
+		},
+		error: function(xhr, textStatus, serverText){
+			handleQueryError(book, "candles", xhr, textStatus, serverText);
+		},
+	});
+}
+
+function updateState(book, type, response, textStatus, xhr) {
+	if (textStatus == 'success') {
+		console.info("updateState("+book+", "+type+"): response=", response);
+		state.message = "";
+		book = book.toLowerCase().replace(/-/g, '_');
+		switch(type) {
+		case "ticker":
+			var ask = parseFloat(response.ask);
+			var bid = parseFloat(response.bid);
+			state[book].ask = ask;
+			state[book].bid = bid;
+			var h = ask;
+			var l = bid;
+			if (typeof state[book].high != "number") state[book].high = h;
+			if (typeof state[book].low  != "number") state[book].low  = l;
+			if (h > state[book].high) state[book].high = h;
+			if (l < state[book].low)  state[book].low  = l;
+			state.nextQuery = Date.now() + 300000;
+			console.info("nextQuery=", state.nextQuery);
+			break;
+		case "candles":
+			var volume = 0;
+			for (i in response) {
+				v = response[i];
+				var h = v[2];
+				var l = v[1];
+				if (h > state[book].high) state[book].high = h;
+				if (l < state[book].low)  state[book].low  = l;
+				// open
+				state[book].open = v[3];
+				if (v[3] > state[book].high) state[book].high = v[3];
+				if (v[3] < state[book].low)  state[book].low  = v[3];
+				// close
+				state[book].close = v[4];
+				if (v[4] > state[book].high) state[book].high = v[4];
+				if (v[4] < state[book].low)  state[book].low  = v[4];
+				// trends
+				state[book].trend = v[4] - v[3];
+				if (typeof state[book].trendAvg == "undefined") {
+					state[book].trendAvg = state[book].trend;
+				} else {
+					state[book].trendAvg = ((4 * state[book].trendAvg) + state[book].trend) / 5
+				}
+				// volume
+				volume += v[5];
+			};
+			state[book].volume = volume;
+			break;
+		default:
+			state.message += "; Unknown type: '" + type + "'";
+		}
+	} else {
+		console.info("updateState: xhr=", xhr);
+		console.info("updateState: textStatus=", textStatus);
+	}
+	state.updateContent++;
+}
+
+function renderPrice(field, price) {
+	$(field).html('$' + price);
+}
+
+function renderMiddle(field, book) {
+	var spread = book.ask - book.bid;
+	spread = (Math.abs(spread) > 0.011) ? (" +" + Math.round(spread,2)) : "";
+	var trend = book.trend;
+	trend = ((trend > 0) ? "+" : "") + Math.round(trend, 3);
+	var trendAvg = book.trendAvg;
+	trendAvg = ((trendAvg > 0) ? "+" : "") + Math.round(trendAvg, 3);
+	$(field).html('$' + book.ask + spread + " / Trend:" + trend + " Avg:" + trendAvg);
+}
+
+function updateContent() {
+console.info("updateContent: state=", state);
+	$('#msg').html(state.message);
+	renderPrice('#btc_H', state.btc_usd.high);
+	renderPrice('#btc_L', state.btc_usd.low);
+	renderPrice('#eth_H', state.eth_usd.high);
+	renderPrice('#eth_L', state.eth_usd.low);
+	renderMiddle('#btc_M', state.btc_usd);
+	renderMiddle('#eth_M', state.eth_usd);
+	$("body").removeClass("loading");
+}
+
+function updateData() {
+	$("body").addClass("loading");
+	$("#msg").html("");
+	queryTicker("BTC-USD", updateState);
+	queryTicker("ETH-USD", updateState);
+	//TODO: uncomment these:
+	//queryTicker("ETH-BTC", updateState);
+	//queryTicker("BTC-EUR", updateState);
+	//queryTicker("ETH-EUR", updateState);
+}
+
+function messagePump() {
+	var now = Date.now();
+	if (state.nextQuery < 0) {
+		// Startup phase...
+	} else if (now > state.nextQuery) {
+		updateData();
+	}
+	if (state.updateContent) {
+		state.updateContent = 0;
+		updateContent();
+	}
+}
+
+function init() {
+	updateData();
+	state.messagePumpHandle = setInterval(messagePump, 1000);
+}
+
+$(init);
+
+//--></script>
+</head>
+<body class="loading">
+<table border=0 style='width:99.8%; height:99%;'>
+	<tr>
+		<td id='msg' colspan=3>msg</td>
+	</tr>
+	<tr>
+		<td class="label top left"></td>
+		<td class="label top">BTC/USD</td>
+		<td class="label top">ETH/USD</td>
+	</tr>
+	<tr>
+		<td class="label left">High:</td>
+		<td id='btc_H'>btc_H</td>
+		<td id='eth_H'>ltc_H</td>
+	</tr>
+	<tr>
+		<td class="label left">Now:</td>
+		<td id='btc_M' class="middle">btc_M</td>
+		<td id='eth_M' class="middle">ltc_M</td>
+	</tr>
+	<tr>
+		<td class="label left">Low:</td>
+		<td id='btc_L'>btc_L</td>
+		<td id='eth_L'>ltc_H</td>
+	</tr>
+</table>
+</body>
+</html>
